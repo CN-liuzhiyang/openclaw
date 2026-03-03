@@ -1,0 +1,31 @@
+[Unit]
+Description=OpenClaw Gateway
+Documentation=https://docs.openclaw.ai
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+WorkingDirectory={{PROJECT_DIR}}
+EnvironmentFile={{PROJECT_DIR}}/.env
+ExecStart=/usr/bin/node {{PROJECT_DIR}}/dist/index.js gateway --bind {{BIND}} --port {{PORT}}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openclaw-gateway
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{CONFIG_DIR}} {{WORKSPACE_DIR}}
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

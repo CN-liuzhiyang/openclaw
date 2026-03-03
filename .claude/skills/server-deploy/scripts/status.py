@@ -1,36 +1,29 @@
 #!/usr/bin/env python3
-"""Show OpenClaw service status."""
+"""Show OpenClaw service status (source and Docker modes)."""
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 
-
-def run(cmd, timeout=15):
-    """Run a shell command and return output."""
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return result.stdout.strip(), result.returncode
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "", 1
+from common import detect_mode, detect_pm, run
 
 
-def main():
-    output_json = "--json" in sys.argv
-
+def status_docker():
+    """Gather status for Docker deployment."""
     sections = {}
 
-    # Container status
-    ps_output, _ = run("docker compose ps 2>/dev/null")
+    ps_output = run("docker compose ps 2>/dev/null")
     sections["containers"] = ps_output or "No containers found"
 
-    # Resource usage
-    stats_output, _ = run("docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}' 2>/dev/null")
+    stats_output = run(
+        "docker stats --no-stream --format "
+        "'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}' 2>/dev/null"
+    )
     sections["resources"] = stats_output or "Cannot fetch resource stats"
 
-    # Uptime
-    uptime_output, _ = run("docker compose ps --format json 2>/dev/null")
+    uptime_output = run("docker compose ps --format json 2>/dev/null")
     if uptime_output:
         uptimes = []
         for line in uptime_output.strip().split("\n"):
@@ -44,60 +37,129 @@ def main():
     else:
         sections["uptime"] = "No data"
 
-    # Gateway health
-    health_output, code = run("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/healthz 2>/dev/null")
-    if health_output == "200":
-        sections["gateway_health"] = "Healthy (HTTP 200)"
-    else:
-        sections["gateway_health"] = f"Unhealthy (HTTP {health_output or 'no response'})"
+    health_output = run(
+        "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/healthz 2>/dev/null"
+    )
+    sections["gateway_health"] = (
+        "Healthy (HTTP 200)" if health_output == "200"
+        else f"Unhealthy (HTTP {health_output or 'no response'})"
+    )
 
-    # Config info
+    logs_output = run("docker compose logs --tail 5 openclaw-gateway 2>/dev/null")
+    sections["recent_logs"] = logs_output[:1000] if logs_output else "No logs available"
+
+    return sections
+
+
+def status_source(pm):
+    """Gather status for source deployment."""
+    sections = {}
+
+    if pm == "systemd":
+        svc = run("systemctl status openclaw-gateway --no-pager 2>/dev/null")
+        sections["service"] = svc or "Service not found (systemctl status failed)"
+
+        props = run(
+            "systemctl show openclaw-gateway "
+            "--property=ActiveState,SubState,MainPID,MemoryCurrent,ActiveEnterTimestamp "
+            "--no-pager 2>/dev/null"
+        )
+        sections["details"] = props or "No details"
+
+    elif pm == "pm2":
+        pm2_out = run("pm2 describe openclaw-gateway 2>/dev/null")
+        sections["service"] = pm2_out or "Process not found in pm2"
+
+        pm2_monit = run("pm2 monit --no-stream 2>/dev/null")
+        if pm2_monit:
+            sections["details"] = pm2_monit[:500]
+        else:
+            sections["details"] = ""
+    else:
+        pid = run("pgrep -f 'node.*dist/index.js.*gateway' 2>/dev/null")
+        if pid:
+            pid_val = pid.split()[0]
+            ps_info = run(f"ps -p {pid_val} -o pid,user,%cpu,%mem,vsz,rss,etime,cmd --no-headers 2>/dev/null")
+            sections["service"] = f"Running (PID: {pid_val})"
+            sections["details"] = ps_info or ""
+        else:
+            sections["service"] = "Not running"
+            sections["details"] = ""
+
+    # Gateway health (same for all)
+    health_output = run(
+        "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18789/healthz 2>/dev/null"
+    )
+    sections["gateway_health"] = (
+        "Healthy (HTTP 200)" if health_output == "200"
+        else f"Unhealthy (HTTP {health_output or 'no response'})"
+    )
+
+    # Logs
+    if pm == "systemd":
+        logs = run("journalctl -u openclaw-gateway --no-pager -n 5 2>/dev/null")
+        sections["recent_logs"] = logs[:1000] if logs else "No logs available"
+    elif pm == "pm2":
+        logs = run("pm2 logs openclaw-gateway --nostream --lines 5 2>/dev/null")
+        sections["recent_logs"] = logs[:1000] if logs else "No logs available"
+    else:
+        sections["recent_logs"] = "No log source available (not managed by systemd/pm2)"
+
+    return sections
+
+
+def print_sections(sections, mode, pm=None):
+    """Pretty-print status sections."""
+    print("\n" + "=" * 60)
+    label = f"mode: {mode}"
+    if mode == "source" and pm:
+        label += f", pm: {pm}"
+    print(f"  OpenClaw Service Status ({label})")
+    print("=" * 60)
+
+    for key, value in sections.items():
+        title = key.replace("_", " ").title()
+        print(f"\n  [{title}]")
+        for line in value.split("\n"):
+            print(f"  {line}")
+
+    print("\n" + "=" * 60)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Show OpenClaw status")
+    parser.add_argument("--mode", choices=["source", "docker"], default=None)
+    parser.add_argument("--pm", choices=["systemd", "pm2"], default=None)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    mode = detect_mode(args.mode)
+    pm = detect_pm(args.pm)
+
+    # Config info (common)
     config_dir = os.path.expanduser("~/.openclaw")
     env_file = ".env"
     config_info = []
     if os.path.exists(config_dir):
         config_info.append(f"Config: {config_dir}")
-        config_size, _ = run(f"du -sh '{config_dir}' 2>/dev/null")
+        config_size = run(f"du -sh '{config_dir}' 2>/dev/null")
         if config_size:
             config_info.append(f"Size: {config_size}")
     if os.path.exists(env_file):
         config_info.append(f"Env: {os.path.abspath(env_file)}")
+
+    if mode == "docker":
+        sections = status_docker()
+    else:
+        sections = status_source(pm)
+
     sections["config"] = "\n  ".join(config_info) if config_info else "Not found"
 
-    # Recent logs (last 5 lines)
-    logs_output, _ = run("docker compose logs --tail 5 openclaw-gateway 2>/dev/null")
-    sections["recent_logs"] = logs_output[:1000] if logs_output else "No logs available"
-
-    if output_json:
+    if args.json:
         print(json.dumps(sections, indent=2))
         return
 
-    print("\n" + "=" * 60)
-    print("  OpenClaw Service Status")
-    print("=" * 60)
-
-    print("\n  [Containers]")
-    for line in sections["containers"].split("\n"):
-        print(f"  {line}")
-
-    print("\n  [Resources]")
-    for line in sections["resources"].split("\n"):
-        print(f"  {line}")
-
-    print("\n  [Uptime]")
-    print(f"  {sections['uptime']}")
-
-    print(f"\n  [Gateway Health]")
-    print(f"  {sections['gateway_health']}")
-
-    print(f"\n  [Configuration]")
-    print(f"  {sections['config']}")
-
-    print(f"\n  [Recent Logs]")
-    for line in sections["recent_logs"].split("\n")[-5:]:
-        print(f"  {line}")
-
-    print("\n" + "=" * 60)
+    print_sections(sections, mode, pm)
 
 
 if __name__ == "__main__":

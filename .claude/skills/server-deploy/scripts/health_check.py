@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Health check for OpenClaw deployment."""
+"""Health check for OpenClaw deployment (source and Docker modes)."""
 
+import argparse
 import json
 import subprocess
 import sys
@@ -8,20 +9,13 @@ import time
 import urllib.request
 import urllib.error
 
-
-def run(cmd, timeout=15):
-    """Run a shell command and return output."""
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return result.stdout.strip(), result.returncode
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "", 1
+from common import detect_mode, run
 
 
 def check_container_status():
-    """Check if OpenClaw containers are running."""
-    output, code = run("docker compose ps --format json 2>/dev/null")
-    if code != 0 or not output:
+    """Check if OpenClaw Docker containers are running."""
+    output = run("docker compose ps --format json 2>/dev/null")
+    if not output:
         return {"status": "fail", "message": "Cannot query Docker containers"}
 
     containers = []
@@ -49,6 +43,40 @@ def check_container_status():
     }
 
 
+def check_process_status():
+    """Check if OpenClaw node process is running (source mode)."""
+    # Check systemd first
+    systemd_status = run("systemctl is-active openclaw-gateway 2>/dev/null")
+    if systemd_status and systemd_status.strip() == "active":
+        detail = run("systemctl show openclaw-gateway --property=MainPID,ActiveEnterTimestamp --no-pager 2>/dev/null")
+        return {"status": "ok", "message": "Process running (systemd: active)", "detail": detail or ""}
+
+    # Check pm2
+    pm2_status = run("pm2 jlist 2>/dev/null")
+    if pm2_status:
+        try:
+            procs = json.loads(pm2_status)
+            for p in procs:
+                if p.get("name") == "openclaw-gateway":
+                    status = p.get("pm2_env", {}).get("status", "unknown")
+                    pid = p.get("pid", "?")
+                    mem = p.get("monit", {}).get("memory", 0)
+                    mem_mb = mem / (1024 * 1024) if mem else 0
+                    return {
+                        "status": "ok" if status == "online" else "fail",
+                        "message": f"Process {status} (pm2, PID: {pid}, Mem: {mem_mb:.0f}MB)",
+                    }
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Check raw process
+    pgrep = run("pgrep -f 'node.*dist/index.js.*gateway' 2>/dev/null")
+    if pgrep:
+        return {"status": "ok", "message": f"Process running (PID: {pgrep.split()[0]})"}
+
+    return {"status": "fail", "message": "OpenClaw gateway process not found"}
+
+
 def check_gateway_health(port=18789, retries=3):
     """Check the gateway health endpoint."""
     url = f"http://127.0.0.1:{port}/healthz"
@@ -66,9 +94,9 @@ def check_gateway_health(port=18789, retries=3):
     return {"status": "fail", "message": f"Gateway not responding on port {port}"}
 
 
-def check_port_bindings():
-    """Check expected port bindings."""
-    output, _ = run("docker compose ps --format json 2>/dev/null")
+def check_port_bindings_docker():
+    """Check expected port bindings (Docker mode)."""
+    output = run("docker compose ps --format json 2>/dev/null")
     if not output:
         return {"status": "warn", "message": "Cannot check port bindings"}
 
@@ -84,31 +112,40 @@ def check_port_bindings():
             except (json.JSONDecodeError, TypeError):
                 continue
 
-    return {"status": "ok" if ports else "warn", "message": f"Ports: {', '.join(ports) if ports else 'none detected'}"}
+    return {
+        "status": "ok" if ports else "warn",
+        "message": f"Ports: {', '.join(ports) if ports else 'none detected'}",
+    }
 
 
-def check_resource_usage():
+def check_port_listening(port=18789):
+    """Check if the gateway port is listening (source mode)."""
+    output = run(f"ss -tlnp 2>/dev/null | grep :{port}")
+    if output:
+        return {"status": "ok", "message": f"Port {port} listening"}
+    return {"status": "warn", "message": f"Port {port} not listening"}
+
+
+def check_resource_usage_docker():
     """Check container resource usage."""
-    output, code = run("docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null")
-    if code != 0 or not output:
+    output = run(
+        "docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null"
+    )
+    if not output:
         return {"status": "warn", "message": "Cannot check resource usage"}
     return {"status": "ok", "message": output}
 
 
-def check_disk_usage():
-    """Check Docker disk usage."""
-    output, _ = run("docker system df 2>/dev/null")
-    if not output:
-        return {"status": "warn", "message": "Cannot check Docker disk usage"}
-    return {"status": "ok", "message": output}
-
-
 def main():
-    """Run health checks."""
-    output_json = "--json" in sys.argv
-    wait = "--wait" in sys.argv
+    parser = argparse.ArgumentParser(description="OpenClaw health check")
+    parser.add_argument("--mode", choices=["source", "docker"], default=None)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--wait", action="store_true")
+    args = parser.parse_args()
 
-    if wait:
+    mode = detect_mode(args.mode)
+
+    if args.wait:
         print("Waiting for services to start (max 60s)...")
         for i in range(12):
             result = check_gateway_health()
@@ -116,43 +153,46 @@ def main():
                 break
             time.sleep(5)
 
-    checks = [
-        ("Container Status", check_container_status()),
-        ("Gateway Health", check_gateway_health()),
-        ("Port Bindings", check_port_bindings()),
-        ("Resource Usage", check_resource_usage()),
-    ]
+    # Build checks
+    checks = []
+    if mode == "docker":
+        checks.append(("Container Status", check_container_status()))
+        checks.append(("Gateway Health", check_gateway_health()))
+        checks.append(("Port Bindings", check_port_bindings_docker()))
+        checks.append(("Resource Usage", check_resource_usage_docker()))
+    else:
+        checks.append(("Process Status", check_process_status()))
+        checks.append(("Gateway Health", check_gateway_health()))
+        checks.append(("Port Listening", check_port_listening()))
 
-    if output_json:
+    if args.json:
         results = {name: result for name, result in checks}
         print(json.dumps(results, indent=2))
         has_fail = any(r["status"] == "fail" for _, r in checks)
         sys.exit(1 if has_fail else 0)
 
-    status_icons = {"ok": "✓", "warn": "⚠", "fail": "✗"}
+    status_icons = {"ok": "\u2713", "warn": "\u26a0", "fail": "\u2717"}
     has_fail = False
 
     print("\n" + "=" * 60)
-    print("  OpenClaw Health Check")
+    print(f"  OpenClaw Health Check (mode: {mode})")
     print("=" * 60)
 
     for name, result in checks:
         icon = status_icons.get(result["status"], "?")
         print(f"\n  {icon} {name}")
         message = result["message"]
-        # Handle multiline messages (e.g., docker stats table)
         if "\n" in message:
             for line in message.split("\n"):
                 print(f"    {line}")
         else:
             print(f"    {message}")
-
-        # Print container details
+        if result.get("detail"):
+            print(f"    {result['detail']}")
         if "containers" in result:
             for c in result["containers"]:
                 health_str = f" ({c['health']})" if c.get("health") else ""
                 print(f"      - {c['name']}: {c['state']} {c['status']}{health_str}")
-
         if result["status"] == "fail":
             has_fail = True
 

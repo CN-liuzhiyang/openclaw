@@ -1,0 +1,54 @@
+{
+  "skill_name": "server-deploy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我刚买了一台腾讯云服务器，想把 OpenClaw 部署上去，帮我检查一下服务器环境是否满足要求",
+      "expected_output": "Should trigger server-deploy skill, run check_env.py to verify Docker, memory, disk, ports etc.",
+      "files": [],
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "check_env",
+          "description": "Should reference the environment check script"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "帮我在这台服务器上完成 OpenClaw 的首次部署，从安装 Docker 到启动服务全部帮我搞定",
+      "expected_output": "Should trigger server-deploy init workflow: check env, install Docker, configure .env, run docker-setup.sh, health check",
+      "files": [],
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "docker",
+          "description": "Should mention Docker installation or usage"
+        },
+        {
+          "type": "contains",
+          "value": "deploy",
+          "description": "Should reference the deployment process"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "OpenClaw 有新版本了，帮我更新一下，记得先备份",
+      "expected_output": "Should trigger update workflow: backup first, pull latest, rebuild, restart, health check",
+      "files": [],
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "backup",
+          "description": "Should create backup before updating"
+        },
+        {
+          "type": "contains",
+          "value": "update",
+          "description": "Should reference the update process"
+        }
+      ]
+    }
+  ]
+}

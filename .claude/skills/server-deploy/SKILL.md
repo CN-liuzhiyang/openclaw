@@ -26,6 +26,7 @@ Deploy, manage, and maintain OpenClaw on Linux servers. This skill is designed t
 by Claude Code running **directly on the server**, giving full local filesystem access.
 
 Supports two deployment modes:
+
 - **source** (default): Build from source code, managed by systemd or pm2. Best for developers who maintain their own fork.
 - **docker**: Deploy via Docker Compose. Best for isolated, reproducible deployments.
 
@@ -51,9 +52,23 @@ This skill expects to run inside the OpenClaw project directory (the cloned repo
 - **Source mode**: Node.js >= 22, pnpm, git
 - **Docker mode**: Docker, Docker Compose, git
 
+### Network / Proxy (China-mainland servers)
+
+Scripts auto-detect a local mihomo/Clash proxy on `127.0.0.1:7890` and inject
+`http_proxy`/`https_proxy` into subprocess environments. This is essential because:
+
+- `pnpm install` needs to download binaries from GitHub (e.g. `matrix-sdk-crypto-nodejs`)
+- `pnpm build` uses `pnpm dlx rolldown` which downloads from npm; the **Tencent npm mirror
+  may fail with ECONNRESET** for some packages — the build step automatically uses
+  `npm_config_registry=https://registry.npmjs.org` with proxy to work around this.
+
+If no proxy is available and GitHub is unreachable, deployment will likely time out.
+The `check_env.py` script now reports proxy status as part of the readiness check.
+
 ## Mode Detection
 
 Commands automatically detect the current deployment mode:
+
 1. systemd service `openclaw-gateway` exists → source mode
 2. pm2 has `openclaw-gateway` process → source mode
 3. Docker containers running → docker mode
@@ -79,11 +94,13 @@ Present results to the user in a clear table format. If issues are found, offer 
 The full deployment workflow. Execute these steps in order:
 
 #### Step 1: Environment Check
+
 Run `check_env.py` first. If critical issues are found, fix them before proceeding.
 
 #### Step 2: Install Prerequisites
 
 **Source mode:**
+
 ```bash
 # Install Node.js 22 (if needed)
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -94,12 +111,14 @@ npm install -g pnpm
 ```
 
 **Docker mode:**
+
 ```bash
 curl -fsSL https://get.docker.com | sh
 systemctl enable docker && systemctl start docker
 ```
 
 #### Step 3: Security Hardening
+
 ```bash
 apt install -y ufw
 ufw allow 22/tcp
@@ -112,6 +131,7 @@ systemctl enable fail2ban && systemctl start fail2ban
 ```
 
 #### Step 4: Configure Environment
+
 1. Copy `.env.example` to `.env` if it doesn't exist
 2. Ask the user for required values:
    - AI provider API keys (at least one of: ANTHROPIC_API_KEY, OPENAI_API_KEY)
@@ -126,14 +146,16 @@ systemctl enable fail2ban && systemctl start fail2ban
 #### Step 5: Deploy
 
 **Source mode:**
+
 ```bash
 python3 .claude/skills/server-deploy/scripts/deploy.py --mode source --pm systemd
 # or: --pm pm2
 ```
 
-This runs: `pnpm install` → `pnpm build` → install systemd service/pm2 config → start.
+This runs: `pnpm install` → `pnpm build` → `pnpm ui:build` → configure gateway → install systemd service/pm2 config → start.
 
 **Docker mode:**
+
 ```bash
 python3 .claude/skills/server-deploy/scripts/deploy.py --mode docker
 ```
@@ -141,14 +163,17 @@ python3 .claude/skills/server-deploy/scripts/deploy.py --mode docker
 This runs: `docker compose build` → `docker compose up -d openclaw-gateway`.
 
 #### Step 6: Health Check
+
 ```bash
 python3 .claude/skills/server-deploy/scripts/health_check.py --mode source
 ```
 
 #### Step 7: Nginx Setup (optional)
+
 Ask the user if they want to set up Nginx reverse proxy. If yes, run the nginx setup.
 
 #### Step 8: SSL Setup (optional)
+
 If the user has a domain, offer to configure SSL with Let's Encrypt.
 
 ### update — Update to Latest Version
@@ -186,6 +211,7 @@ python3 .claude/skills/server-deploy/scripts/rollback.py [--mode source|docker] 
 ```
 
 **Source mode** supports two rollback methods:
+
 - `--git-ref <tag|commit>`: Checkout a specific git tag/commit, rebuild, and restart.
 - `--backup-file <path>`: Restore data from a backup archive.
 
@@ -212,16 +238,19 @@ Installs certbot, obtains a Let's Encrypt certificate, and configures Nginx for 
 ### logs — View Logs
 
 **Source mode (systemd):**
+
 ```bash
 journalctl -u openclaw-gateway -f --no-pager -n 100
 ```
 
 **Source mode (pm2):**
+
 ```bash
 pm2 logs openclaw-gateway --lines 100
 ```
 
 **Docker mode:**
+
 ```bash
 docker compose logs -f --tail 100 openclaw-gateway
 ```
@@ -231,6 +260,7 @@ docker compose logs -f --tail 100 openclaw-gateway
 After deployment, the user may want to connect messaging channels:
 
 **Source mode:**
+
 ```bash
 node dist/index.js channels login          # WhatsApp (QR code)
 node dist/index.js channels add --channel telegram --token <BOT_TOKEN>
@@ -238,6 +268,7 @@ node dist/index.js channels add --channel discord --token <BOT_TOKEN>
 ```
 
 **Docker mode:**
+
 ```bash
 docker compose run --rm openclaw-cli channels login
 docker compose run --rm openclaw-cli channels add --channel telegram --token <BOT_TOKEN>
@@ -248,62 +279,68 @@ Full channel docs: https://docs.openclaw.ai/channels
 
 ## Templates
 
-| File | Purpose |
-|------|---------|
-| `templates/nginx-openclaw.conf` | Nginx reverse proxy config |
-| `templates/env.template` | Environment variable reference |
-| `templates/openclaw-gateway.service` | systemd service unit file |
-| `templates/ecosystem.config.cjs` | pm2 ecosystem configuration |
+| File                                 | Purpose                        |
+| ------------------------------------ | ------------------------------ |
+| `templates/nginx-openclaw.conf`      | Nginx reverse proxy config     |
+| `templates/env.template`             | Environment variable reference |
+| `templates/openclaw-gateway.service` | systemd service unit file      |
+| `templates/ecosystem.config.cjs`     | pm2 ecosystem configuration    |
 
 ## Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `scripts/common.py` | Shared utilities (mode detection, service control) |
-| `scripts/check_env.py` | Check server environment readiness |
-| `scripts/deploy.py` | Execute deployment steps |
-| `scripts/health_check.py` | Verify deployment health |
-| `scripts/backup.py` | Backup OpenClaw data |
-| `scripts/update.py` | Update to latest version |
-| `scripts/rollback.py` | Rollback to previous version |
-| `scripts/status.py` | Show service status |
-| `scripts/setup_nginx.py` | Configure Nginx reverse proxy |
-| `scripts/setup_ssl.py` | Configure Let's Encrypt SSL |
+| Script                    | Purpose                                            |
+| ------------------------- | -------------------------------------------------- |
+| `scripts/common.py`       | Shared utilities (mode detection, service control) |
+| `scripts/check_env.py`    | Check server environment readiness                 |
+| `scripts/deploy.py`       | Execute deployment steps                           |
+| `scripts/health_check.py` | Verify deployment health                           |
+| `scripts/backup.py`       | Backup OpenClaw data                               |
+| `scripts/update.py`       | Update to latest version                           |
+| `scripts/rollback.py`     | Rollback to previous version                       |
+| `scripts/status.py`       | Show service status                                |
+| `scripts/setup_nginx.py`  | Configure Nginx reverse proxy                      |
+| `scripts/setup_ssl.py`    | Configure Let's Encrypt SSL                        |
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Port 18789 already in use**: Another service is using the gateway port.
+
    ```bash
    lsof -i :18789
    # Kill the process or change OPENCLAW_GATEWAY_PORT in .env
    ```
 
 2. **Source build fails (`pnpm build`)**: Ensure Node.js >= 22.12.0 and pnpm are installed.
+
    ```bash
    node --version   # Should be v22.x or higher
    pnpm --version   # Should be 10.x or higher
    ```
 
 3. **systemd service fails to start**: Check logs and service file.
+
    ```bash
    journalctl -u openclaw-gateway -n 50 --no-pager
    systemctl cat openclaw-gateway
    ```
 
 4. **pm2 process keeps restarting**: Check error logs.
+
    ```bash
    pm2 logs openclaw-gateway --err --lines 50
    ```
 
 5. **Docker permission denied**: Current user not in docker group.
+
    ```bash
    sudo usermod -aG docker $USER
    # Log out and back in
    ```
 
 6. **Health check fails after deploy**: Service might need time to start.
+
    ```bash
    # Source mode
    journalctl -u openclaw-gateway -f
@@ -313,9 +350,40 @@ Full channel docs: https://docs.openclaw.ai/channels
    ```
 
 7. **Out of disk space**: Clean up old builds or Docker images.
+
    ```bash
    # Docker mode
    docker system prune -a
    # Source mode — remove old node_modules
    rm -rf node_modules && pnpm install
    ```
+
+8. **`pnpm install` times out**: GitHub-hosted binaries can't be downloaded.
+
+   ```bash
+   # Ensure proxy is running and env vars are set
+   export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890
+   pnpm install
+   ```
+
+9. **`pnpm build` fails at A2UI bundle (rolldown ECONNRESET)**: Tencent npm mirror
+   returns connection errors for the `rolldown` package.
+
+   ```bash
+   # Use official npm registry with proxy for the build
+   npm_config_registry=https://registry.npmjs.org pnpm build
+   ```
+
+10. **Gateway exits with "Missing config"**: First-time deployment needs initial config.
+
+    ```bash
+    node dist/index.js config set gateway.mode local
+    # For non-loopback binds (bind=lan), also set:
+    node dist/index.js config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+    ```
+
+    The deploy script now handles this automatically.
+
+11. **Gateway startup takes 30+ seconds**: The gateway is slow to initialize on first run.
+    The health check uses `--wait` to poll for up to 90 seconds. Don't panic if it takes
+    a while to respond.

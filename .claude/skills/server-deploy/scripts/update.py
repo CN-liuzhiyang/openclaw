@@ -53,12 +53,14 @@ def main():
     # Step 3: Rebuild
     if mode == "source":
         print("\n[3/5] Rebuilding from source...")
-        if not run_verbose("pnpm install --frozen-lockfile 2>/dev/null || pnpm install", timeout=300):
+        if not run_verbose("pnpm install --frozen-lockfile 2>/dev/null || pnpm install", timeout=600):
             print("  Failed to install dependencies", file=sys.stderr)
             sys.exit(1)
-        if not run_verbose("pnpm build", timeout=600):
+        if not run_verbose("npm_config_registry=https://registry.npmjs.org pnpm build", timeout=600):
             print("  Failed to build", file=sys.stderr)
             sys.exit(1)
+        # Rebuild Control UI
+        run_verbose("npm_config_registry=https://registry.npmjs.org pnpm ui:build", timeout=300, check=False)
     else:
         print("\n[3/5] Rebuilding Docker image...")
         if not run_verbose("docker compose build", timeout=600):

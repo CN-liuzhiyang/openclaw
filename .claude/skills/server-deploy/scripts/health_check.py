@@ -146,10 +146,11 @@ def main():
     mode = detect_mode(args.mode)
 
     if args.wait:
-        print("Waiting for services to start (max 60s)...")
-        for i in range(12):
+        print("Waiting for services to start (max 90s)...")
+        for i in range(18):
             result = check_gateway_health()
             if result["status"] == "ok":
+                print(f"  Gateway healthy after ~{(i+1)*5}s")
                 break
             time.sleep(5)
 

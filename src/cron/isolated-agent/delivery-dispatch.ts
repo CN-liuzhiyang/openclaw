@@ -673,8 +673,14 @@ export async function dispatchCronDelivery(
     // Finalize descendant/subagent output first for text-only cron runs, then
     // send through the real outbound adapter so delivered=true always reflects
     // an actual channel send instead of internal announce routing.
+    //
+    // Forum/topic targets and jobs with explicit delivery targets should also
+    // use direct delivery to avoid being swallowed by ANNOUNCE_SKIP/NO_REPLY.
+    const hasExplicitDeliveryTarget = params.resolvedDelivery.mode === "explicit";
     const useDirectDelivery =
-      params.deliveryPayloadHasStructuredContent || params.resolvedDelivery.threadId != null;
+      params.deliveryPayloadHasStructuredContent ||
+      params.resolvedDelivery.threadId != null ||
+      hasExplicitDeliveryTarget;
     if (useDirectDelivery) {
       const directResult = await deliverViaDirect(params.resolvedDelivery);
       if (directResult) {

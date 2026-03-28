@@ -7,11 +7,48 @@ import subprocess
 import sys
 
 
+def _get_env_with_proxy():
+    """Return a copy of os.environ that includes proxy settings if available.
+
+    Detects mihomo/Clash proxy at 127.0.0.1:7890 and injects http_proxy/https_proxy
+    when not already set. This is critical for China-mainland servers where direct
+    access to GitHub, npm, etc. is slow or blocked.
+    """
+    env = os.environ.copy()
+    if env.get("http_proxy") or env.get("HTTP_PROXY"):
+        return env  # already configured
+
+    # Auto-detect local proxy (mihomo / Clash Meta)
+    import socket
+    proxy_addr = "http://127.0.0.1:7890"
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            if s.connect_ex(("127.0.0.1", 7890)) == 0:
+                env.setdefault("http_proxy", proxy_addr)
+                env.setdefault("https_proxy", proxy_addr)
+                env.setdefault("HTTP_PROXY", proxy_addr)
+                env.setdefault("HTTPS_PROXY", proxy_addr)
+    except OSError:
+        pass
+    return env
+
+
+def proxy_env():
+    """Return proxy env dict (subset) for display/logging. Empty dict if no proxy."""
+    env = _get_env_with_proxy()
+    proxy = env.get("http_proxy") or env.get("HTTP_PROXY")
+    if proxy:
+        return {"http_proxy": proxy, "https_proxy": env.get("https_proxy", proxy)}
+    return {}
+
+
 def run(cmd, capture=True, check=False, timeout=120):
     """Run a shell command and return output."""
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=capture, text=True, timeout=timeout
+            cmd, shell=True, capture_output=capture, text=True,
+            timeout=timeout, env=_get_env_with_proxy(),
         )
         if check and result.returncode != 0:
             return None
@@ -25,8 +62,10 @@ def run(cmd, capture=True, check=False, timeout=120):
 def run_verbose(cmd, timeout=300, check=True):
     """Run a shell command with output printed."""
     print(f"  $ {cmd}")
+    env = _get_env_with_proxy()
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        cmd, shell=True, capture_output=True, text=True,
+        timeout=timeout, env=env,
     )
     if result.stdout.strip():
         for line in result.stdout.strip().split("\n")[-20:]:

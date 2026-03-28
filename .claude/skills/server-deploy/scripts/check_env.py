@@ -9,7 +9,7 @@ import socket
 import subprocess
 import sys
 
-from common import run
+from common import run, proxy_env
 
 
 def check_os():
@@ -156,6 +156,35 @@ def check_git():
     return {"status": "ok", "message": version, "detail": ""}
 
 
+def check_proxy():
+    """Check network proxy configuration.
+
+    Critical for China-mainland servers where direct access to GitHub/npm is
+    slow or blocked. Detects mihomo/Clash proxy on 127.0.0.1:7890.
+    """
+    p = proxy_env()
+    if p:
+        addr = p.get("http_proxy", "")
+        return {"status": "ok", "message": f"Proxy available: {addr}",
+                "detail": "Auto-detected local proxy (mihomo/Clash)"}
+
+    # Check if mihomo is running but env vars aren't set
+    mihomo_running = run("systemctl is-active mihomo 2>/dev/null")
+    if mihomo_running and mihomo_running.strip() == "active":
+        return {"status": "warn",
+                "message": "mihomo service running but proxy env not set",
+                "detail": "Run: export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890"}
+
+    # Test GitHub connectivity as a proxy for general internet access
+    github_test = run("curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 https://github.com 2>/dev/null")
+    if github_test and github_test.strip() == "200":
+        return {"status": "ok", "message": "No proxy needed (direct internet access OK)", "detail": ""}
+
+    return {"status": "warn",
+            "message": "No proxy detected and GitHub unreachable",
+            "detail": "If in China, set up a proxy. pnpm install/build may fail for GitHub-hosted deps."}
+
+
 def check_project_files(mode):
     """Check if essential project files exist."""
     if mode == "source":
@@ -231,6 +260,7 @@ def main():
 
     checks.extend([
         ("Git", check_git()),
+        ("Network / Proxy", check_proxy()),
         ("Memory (RAM)", check_memory()),
         ("Disk Space", check_disk()),
         ("Port 18789 (Gateway)", check_port(18789)),

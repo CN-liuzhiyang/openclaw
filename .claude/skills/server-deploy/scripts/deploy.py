@@ -9,7 +9,7 @@ import sys
 
 from common import (
     detect_mode, detect_pm, get_project_dir, get_config_dir,
-    run, run_verbose, start_service,
+    run, run_verbose, start_service, proxy_env,
 )
 
 
@@ -40,13 +40,36 @@ def setup_env():
 def install_dependencies():
     """Run pnpm install."""
     print("\n  Installing dependencies with pnpm...")
-    return run_verbose("pnpm install --frozen-lockfile 2>/dev/null || pnpm install", timeout=300)
+    p = proxy_env()
+    if p:
+        print(f"    (proxy detected: {p.get('http_proxy', 'none')})")
+    return run_verbose("pnpm install --frozen-lockfile 2>/dev/null || pnpm install", timeout=600)
 
 
 def build_project():
-    """Run pnpm build."""
+    """Run pnpm build and pnpm ui:build.
+
+    The A2UI bundling step uses `pnpm dlx rolldown` which may fail when a
+    China-mainland npm mirror (e.g. Tencent mirrors) is configured as the
+    default registry — the mirror often returns ECONNRESET for rolldown.
+    We work around this by temporarily setting npm_config_registry to the
+    official npmjs.org registry; the proxy env (auto-detected in common.py)
+    ensures connectivity.
+    """
     print("\n  Building project...")
-    return run_verbose("pnpm build", timeout=600)
+    # Use official registry for pnpm dlx calls (rolldown) to avoid mirror issues
+    if not run_verbose(
+        "npm_config_registry=https://registry.npmjs.org pnpm build", timeout=600
+    ):
+        return False
+
+    # Build Control UI assets (required for /health endpoint and web dashboard)
+    print("\n  Building Control UI...")
+    if not run_verbose(
+        "npm_config_registry=https://registry.npmjs.org pnpm ui:build", timeout=300
+    ):
+        print("  ⚠ UI build failed (non-critical, gateway will still work)")
+    return True
 
 
 def install_systemd_service():
@@ -126,6 +149,49 @@ def install_pm2_service():
     return True
 
 
+def configure_gateway():
+    """Set essential gateway config values for first-time deployment.
+
+    Without these, the gateway exits immediately with:
+    - 'Missing config. Run openclaw setup or set gateway.mode=local'
+    - 'non-loopback Control UI requires gateway.controlUi.allowedOrigins'
+    """
+    project_dir = get_project_dir()
+    node = shutil.which("node") or "node"
+    cli = os.path.join(project_dir, "dist", "index.js")
+
+    if not os.path.exists(cli):
+        print("  ⚠ dist/index.js not found, skipping gateway config")
+        return
+
+    # Read .env to check bind mode
+    bind = "lan"
+    env_file = os.path.join(project_dir, ".env")
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.strip().startswith("OPENCLAW_GATEWAY_BIND="):
+                    bind = line.strip().split("=", 1)[1].strip('"').strip("'") or bind
+
+    config_dir = get_config_dir()
+    config_file = os.path.join(config_dir, "openclaw.json")
+
+    # Only configure if no config exists yet (fresh deployment)
+    if os.path.exists(config_file):
+        print("  Gateway config already exists, skipping auto-configure")
+        return
+
+    print("\n  Configuring gateway defaults...")
+    run_verbose(f"{node} {cli} config set gateway.mode local", check=False)
+    # For non-loopback binds, allow Host-header origin fallback for Control UI
+    if bind != "loopback":
+        run_verbose(
+            f"{node} {cli} config set "
+            "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true",
+            check=False,
+        )
+
+
 def deploy_source(pm):
     """Deploy OpenClaw from source code."""
     print("  Deployment mode: SOURCE")
@@ -141,6 +207,9 @@ def deploy_source(pm):
     config_dir = get_config_dir()
     os.makedirs(config_dir, exist_ok=True)
     os.makedirs(os.path.join(config_dir, "workspace"), exist_ok=True)
+
+    # Configure gateway defaults (must happen after build, before start)
+    configure_gateway()
 
     # Setup process manager
     if pm == "systemd":
@@ -211,11 +280,14 @@ def main():
         sys.exit(1)
 
     # Step 1: Setup .env
-    print("\n[1/3] Checking environment configuration...")
+    print("\n[1/4] Checking environment configuration...")
+    p = proxy_env()
+    if p:
+        print(f"  Proxy detected: {p.get('http_proxy', 'none')}")
     setup_env()
 
     # Step 2: Deploy
-    print("\n[2/3] Deploying OpenClaw...")
+    print("\n[2/4] Deploying OpenClaw...")
     if mode == "source":
         success = deploy_source(pm)
     else:
@@ -225,8 +297,20 @@ def main():
         print("\n  ✗ Deployment failed!", file=sys.stderr)
         sys.exit(1)
 
-    # Step 3: Health check
-    print("\n[3/3] Running health check...")
+    # Step 3: Wait for gateway startup
+    print("\n[3/4] Waiting for gateway to start (up to 60s)...")
+    import time
+    for i in range(12):
+        time.sleep(5)
+        port_check = run(f"ss -tlnp 2>/dev/null | grep :18789")
+        if port_check:
+            print(f"  Gateway port listening after ~{(i+1)*5}s")
+            break
+    else:
+        print("  ⚠ Gateway port not detected after 60s — check logs")
+
+    # Step 4: Health check
+    print("\n[4/4] Running health check...")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     health_script = os.path.join(script_dir, "health_check.py")
     if os.path.exists(health_script):
